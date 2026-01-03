@@ -19,6 +19,9 @@ fi
 if [[ -f "${requirements}" ]]; then
   echo "Installing dependencies (requirements.txt)..."
   "${py}" -m pip --disable-pip-version-check --quiet install --progress-bar off -r "${requirements}"
+else
+  echo "Installing dependencies (pyproject.toml)..."
+  "${py}" -m pip --disable-pip-version-check --quiet install --progress-bar off -e "${repo_root}"
 fi
 
 exec "${py}" -m cursor_mover "$@"

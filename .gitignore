@@ -1,15 +1,46 @@
+# Virtual environments
 .venv/
+venv/
+ENV/
+env/
 .env
 
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.pyw
-*.pyz
-*.pywz
-*.pyzw
-*.pyzwz
-*.pyzwzw
-*.pyzwzwz
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+
+# PyPI credentials
+.pypirc
 

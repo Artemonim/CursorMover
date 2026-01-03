@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursor-mover"
+version = "1.0.0"
+description = "A utility to move or copy a Cursor workspace folder together with the Agent history"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Artemonim"}
+]
+keywords = ["cursor", "vscode", "workspace", "chat", "history", "migration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "tqdm>=4.66.0",
+    "colorama>=0.4.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/Artemonim/CursorMover"
+Repository = "https://github.com/Artemonim/CursorMover"
+Issues = "https://github.com/Artemonim/CursorMover/issues"
+
+[project.scripts]
+cursor-mover = "cursor_mover.cli:main"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*"]

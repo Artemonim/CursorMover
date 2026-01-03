@@ -1,8 +1,53 @@
 # CursorMover
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://github.com/Artemonim/CursorMover/actions/workflows/tests.yml/badge.svg)](https://github.com/Artemonim/CursorMover/actions/workflows/tests.yml)
+
 A utility to move or copy a project folder (Cursor workspace) **together with the Agent history**, so that after changing the path the history doesn't "disappear" from the UI.
 
 Based on an observation from a Cursor Community thread: [Lost access to 5-7 Agent conversations after workspace folder restructure](https://forum.cursor.com/t/lost-access-to-5-7-agent-conversations-after-workspace-folder-restructure/147837).
+
+## Features
+
+- ✅ **Copy/Move workspaces** with full chat history preservation
+- ✅ **Merge chat histories** from duplicate workspace storage entries
+- ✅ **Database lock checking** for safe operations
+- ✅ **Cross-platform support** (Windows, macOS, Linux)
+- ✅ **Interactive TUI** for easy usage
+- ✅ **CLI mode** for scripting and automation
+- ✅ **Workspace diagnostics** (doctor command)
+- ✅ **Automatic backup** before risky operations
+- ✅ **SQLite integrity checks** after modifications
+
+## Table of Contents
+
+- [Important (Data Safety)](#important-data-safety)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [What exactly happens (Mode C)](#what-exactly-happens-mode-c)
+- [Commands](#commands)
+  - [Doctor](#doctor-command)
+  - [Copy/Move](#copymove-workspace--transfer-chats)
+  - [Merge](#merge-command)
+- [CLI overview](#cli-overview)
+- [Limitations](#limitations)
+- [Tests](#tests)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Installation
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions.
+
+Quick install from source:
+
+```bash
+git clone https://github.com/Artemonim/CursorMover.git
+cd CursorMover
+```
 
 ## Important (Data Safety)
 
@@ -145,3 +190,50 @@ python -m cursor_mover merge --path "G:\GitHub\RUSTDemo"
 ```powershell
 python -m unittest -v
 ```
+
+## Documentation
+
+Comprehensive documentation is available:
+
+- **[Installation Guide](INSTALL.md)** - Detailed installation instructions
+- **[Usage Examples](EXAMPLES.md)** - Practical examples and scenarios
+- **[FAQ](FAQ.md)** - Frequently asked questions
+- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute to the project
+- **[Publishing Guide](PUBLISHING.md)** - Instructions for maintainers
+- **[Security Policy](SECURITY.md)** - Security information and reporting
+- **[Changelog](CHANGELOG.md)** - Version history and changes
+- **[Roadmap](ROADMAP.md)** - Future plans and ideas
+- **[Pre-Release Checklist](PRE_RELEASE_CHECKLIST.md)** - Release preparation checklist
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to this project.
+
+### Code of Conduct
+
+Please note that this project is released with a [Contributor Code of Conduct](CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of changes in each version.
+
+## Support
+
+If you encounter any issues or have questions:
+
+1. Check the [existing issues](https://github.com/Artemonim/CursorMover/issues)
+2. Read the [documentation](README.md)
+3. Open a [new issue](https://github.com/Artemonim/CursorMover/issues/new/choose) if needed
+
+## Acknowledgments
+
+- Inspired by the Cursor Community discussion on workspace migration
+- Built with Python and love for the developer community
+
+## Disclaimer
+
+This is a best-effort utility. Cursor's internal storage format and workspace ID logic may change between versions. Always make backups before performing operations on important workspaces.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

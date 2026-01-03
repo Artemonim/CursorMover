@@ -103,7 +103,7 @@ Large databases or many files can take time to process. This is normal. Progress
 
 ### I got an error about Python version
 
-CursorMover requires Python 3.8 or higher. Update your Python installation:
+CursorMover requires Python 3.11 or higher. Update your Python installation:
 - Windows: Download from [python.org](https://www.python.org/downloads/)
 - macOS: Use Homebrew: `brew install python3`
 - Linux: Use your package manager: `apt install python3` or `yum install python3`

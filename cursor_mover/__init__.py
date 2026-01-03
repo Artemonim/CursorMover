@@ -1,0 +1,2 @@
+"""CursorMover package."""
+

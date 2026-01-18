@@ -99,8 +99,8 @@ def merge_workspace_state(
         dst_item_keys = {k for (k,) in dst_cur.execute("SELECT key FROM ItemTable")}
         dst_disk_keys = {k for (k,) in dst_cur.execute("SELECT key FROM cursorDiskKV")}
 
-        dst_composer = _read_kv(dst_cur, table="ItemTable", key="composer.composerData")
-        composer_ids_before = len(_composer_ids_from_composer_data(dst_composer))
+        dst_composer = read_kv(dst_cur, table="ItemTable", key="composer.composerData")
+        composer_ids_before = len(composer_ids_from_composer_data(dst_composer))
 
         src_composer_values: list[bytes | None] = []
 
@@ -111,7 +111,7 @@ def merge_workspace_state(
                 _ensure_tables_exist(src_cur)
 
                 src_composer_values.append(
-                    _read_kv(src_cur, table="ItemTable", key="composer.composerData")
+                    read_kv(src_cur, table="ItemTable", key="composer.composerData")
                 )
 
                 for key, value in src_cur.execute("SELECT key, value FROM ItemTable"):
@@ -136,7 +136,7 @@ def merge_workspace_state(
                 "INSERT OR REPLACE INTO ItemTable(key, value) VALUES (?, ?)",
                 ("composer.composerData", merged_composer),
             )
-            composer_ids_after = len(_composer_ids_from_composer_data(merged_composer))
+            composer_ids_after = len(composer_ids_from_composer_data(merged_composer))
         else:
             composer_ids_after = composer_ids_before
 
@@ -173,7 +173,7 @@ def _ensure_tables_exist(cur: sqlite3.Cursor) -> None:
     )
 
 
-def _read_kv(cur: sqlite3.Cursor, *, table: str, key: str) -> bytes | None:
+def read_kv(cur: sqlite3.Cursor, *, table: str, key: str) -> bytes | None:
     row = cur.execute(f"SELECT value FROM {table} WHERE key=?", (key,)).fetchone()
     if not row:
         return None
@@ -185,7 +185,7 @@ def _read_kv(cur: sqlite3.Cursor, *, table: str, key: str) -> bytes | None:
     return str(val).encode("utf-8")
 
 
-def _composer_ids_from_composer_data(raw: bytes | None) -> set[str]:
+def composer_ids_from_composer_data(raw: bytes | None) -> set[str]:
     if not raw:
         return set()
     try:

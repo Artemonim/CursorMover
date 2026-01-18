@@ -92,8 +92,13 @@ Note: `merge` is **not** a migration. It does not move/copy your workspace folde
 - the exact inputs used for hashing (fsPath + stat salt);
 - lock check for `state.vscdb` (+ WAL/SHM if present) when a workspaceStorage entry is found.
 - warns if multiple `workspaceStorage/<id>` entries exist for the same folder URI (and suggests `merge`).
+- best-effort check of global chat payload keys in `globalStorage/state.vscdb`.
+- `doctor --all` scans all workspaceStorage entries, flags duplicates, and lists legacy entries with missing folders.
+- `doctor --all --fix-all` merges duplicate entries across all folders (bulk repair).
+- `doctor --all --delete-legacy` deletes entries whose folders no longer exist.
+- Use `--no-check-payloads` to skip payload checks if they are too slow.
 
-This command is read-only (no modifications).
+Default `doctor` is read-only; `--fix-all` and `--delete-legacy` perform modifications with prompts.
 
 ## Quick Start
 
@@ -153,6 +158,24 @@ Check (doctor):
 
 ```powershell
 python -m cursor_mover doctor --path "G:\GitHub\RUSTDemo"
+```
+
+Doctor (all workspaces, detect duplicates/legacy):
+
+```powershell
+.\run.ps1 doctor --all
+```
+
+Doctor (bulk merge duplicates):
+
+```powershell
+.\run.ps1 doctor --all --fix-all
+```
+
+Doctor (delete legacy entries):
+
+```powershell
+.\run.ps1 doctor --all --delete-legacy
 ```
 
 Copy workspace + transfer chats (Mode C):

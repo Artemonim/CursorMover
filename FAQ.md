@@ -45,8 +45,11 @@ The `doctor` command is a diagnostic tool that shows:
 - The folder URI used internally
 - Whether the database is locked
 - If there are duplicate storage entries
+- `doctor --all` can scan all workspaceStorage entries, list duplicates, and flag legacy entries with missing folders
+- Best-effort check of global chat payload keys in `globalStorage/state.vscdb`
+- Use `--no-check-payloads` to skip payload checks if they are too slow
 
-It's a read-only command that doesn't modify anything.
+Default `doctor` is read-only; `--fix-all` and `--delete-legacy` perform modifications with prompts.
 
 ### When should I use the `merge` command?
 

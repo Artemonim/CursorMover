@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
+import string
 import sys
 import time
 from dataclasses import dataclass
@@ -210,6 +213,87 @@ def main(argv: list[str] | None = None) -> int:
             help="Auto-confirm prompts.",
         )
 
+        clone_chat = sub.add_parser(
+            "clone-chat",
+            help="Clone a single chat from one workspace into another.",
+        )
+        clone_chat.add_argument(
+            "--src-path",
+            type=Path,
+            required=True,
+            help="Source workspace folder path.",
+        )
+        clone_chat.add_argument(
+            "--dst-path",
+            type=Path,
+            required=True,
+            help="Destination workspace folder path.",
+        )
+        clone_chat.add_argument(
+            "--title",
+            type=str,
+            required=True,
+            help="Chat title/name to clone.",
+        )
+        clone_chat.add_argument(
+            "--yes",
+            action="store_true",
+            help="Auto-confirm prompts.",
+        )
+        clone_chat.add_argument(
+            "--max-related-keys",
+            type=int,
+            default=200,
+            help="Maximum related keys to copy (default: 200).",
+        )
+
+        dump_handles = sub.add_parser(
+            "dump-composer-handles",
+            help="Dump composer handle diagnostics from a workspace DB.",
+        )
+        dump_handles.add_argument("--path", type=Path, required=True, help="Workspace folder path.")
+        dump_handles.add_argument(
+            "--limit",
+            type=int,
+            default=3,
+            help="Number of composers to inspect (default: 3).",
+        )
+        dump_handles.add_argument(
+            "--max-key-matches",
+            type=int,
+            default=50,
+            help="Maximum ItemTable key matches to show (default: 50).",
+        )
+
+        dump_global_agentkv = sub.add_parser(
+            "dump-global-agentkv",
+            help="Dump globalStorage cursorDiskKV diagnostics (read-only).",
+        )
+        dump_global_agentkv.add_argument(
+            "--limit",
+            type=int,
+            default=200,
+            help="Number of keys to sample (default: 200).",
+        )
+        dump_global_agentkv.add_argument(
+            "--prefix",
+            type=str,
+            default="agentKv:",
+            help="Key prefix filter (default: agentKv:). Use empty string for all keys.",
+        )
+        dump_global_agentkv.add_argument(
+            "--show-prefixes",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Show key prefix distribution (default: True).",
+        )
+        dump_global_agentkv.add_argument(
+            "--grep",
+            type=str,
+            default=None,
+            help="Case-insensitive substring to search in keys and values.",
+        )
+
         args = parser.parse_args(argv)
         cursor_user_dir = args.cursor_user_dir or default_cursor_user_dir()
 
@@ -273,6 +357,33 @@ def main(argv: list[str] | None = None) -> int:
                     cursor_user_dir=cursor_user_dir,
                     path=args.path,
                     assume_yes=args.yes,
+                )
+                return 0
+            if args.cmd == "clone-chat":
+                _cmd_clone_chat(
+                    cursor_user_dir=cursor_user_dir,
+                    src_path=args.src_path,
+                    dst_path=args.dst_path,
+                    title=args.title,
+                    assume_yes=args.yes,
+                    max_related_keys=args.max_related_keys,
+                )
+                return 0
+            if args.cmd == "dump-composer-handles":
+                _cmd_dump_composer_handles(
+                    cursor_user_dir=cursor_user_dir,
+                    path=args.path,
+                    limit=args.limit,
+                    max_key_matches=args.max_key_matches,
+                )
+                return 0
+            if args.cmd == "dump-global-agentkv":
+                _cmd_dump_global_agentkv(
+                    cursor_user_dir=cursor_user_dir,
+                    limit=args.limit,
+                    prefix=args.prefix,
+                    show_prefixes=args.show_prefixes,
+                    grep=args.grep,
                 )
                 return 0
         except WorkspaceStorageLockedError as exc:
@@ -499,6 +610,287 @@ def _read_json_bytes(raw: bytes | None) -> dict | None:
     if isinstance(parsed, dict):
         return parsed
     return None
+
+
+def _composer_title_matches(composer: dict, title: str) -> bool:
+    for field in ("name", "title", "label"):
+        value = composer.get(field)
+        if isinstance(value, str) and value == title:
+            return True
+    return False
+
+
+def _composer_sort_key(composer: dict) -> tuple[int, int]:
+    ts = composer.get("lastUpdatedAt")
+    if isinstance(ts, (int, float)):
+        return 1, int(ts)
+    ts = composer.get("createdAt")
+    if isinstance(ts, (int, float)):
+        return 0, int(ts)
+    return 0, 0
+
+
+def _find_composer_by_title(payload: dict, title: str) -> tuple[dict, int]:
+    composers = payload.get("allComposers")
+    if not isinstance(composers, list):
+        raise ValueError("composer.composerData allComposers is missing or invalid.")
+    matches = [
+        item
+        for item in composers
+        if isinstance(item, dict) and _composer_title_matches(item, title)
+    ]
+    if not matches:
+        raise ValueError(f"No chat found with title/name/label: {title}")
+    selected = max(matches, key=_composer_sort_key)
+    return selected, len(matches)
+
+
+def _composer_exists(payload: dict, *, title: str, composer_id: str) -> bool:
+    composers = payload.get("allComposers")
+    if not isinstance(composers, list):
+        return False
+    for item in composers:
+        if not isinstance(item, dict):
+            continue
+        if item.get("composerId") != composer_id:
+            continue
+        if _composer_title_matches(item, title):
+            return True
+    return False
+
+
+def _extract_hex_needles_from_composer(composer: dict) -> tuple[str, ...]:
+    try:
+        raw = json.dumps(composer, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raw = ""
+    found = {match.lower() for match in _hex_64_substrings(raw)}
+    return tuple(sorted(found))
+
+
+def _key_matches_related(key_text: str, composer_id: str, hex_needles: tuple[str, ...]) -> bool:
+    if composer_id and composer_id in key_text:
+        return True
+    if not hex_needles:
+        return False
+    key_lower = key_text.lower()
+    return any(needle in key_lower for needle in hex_needles if needle)
+
+
+def _copy_related_keys(
+    *,
+    src_cur: sqlite3.Cursor,
+    dst_cur: sqlite3.Cursor,
+    table: str,
+    composer_id: str,
+    hex_needles: tuple[str, ...],
+    max_to_copy: int,
+) -> int:
+    if max_to_copy <= 0:
+        return 0
+    inserted = 0
+    for key, value in src_cur.execute(f"SELECT key, value FROM {table}"):
+        key_text = _decode_db_key(key)
+        # ! Never copy/override the composer registry itself via "related keys".
+        if table == "ItemTable" and key_text == "composer.composerData":
+            continue
+        if not _key_matches_related(key_text, composer_id, hex_needles):
+            continue
+        dst_cur.execute(
+            f"INSERT OR IGNORE INTO {table}(key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        if dst_cur.rowcount > 0:
+            inserted += 1
+            if inserted >= max_to_copy:
+                break
+    return inserted
+
+
+def _decode_db_key(value: object) -> str:
+    """Converts SQLite key values to printable strings.
+
+    Args:
+        value: SQLite key value (text/bytes/memoryview).
+
+    Returns:
+        Decoded string value.
+    """
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def _decode_db_value_text(value: object) -> str | None:
+    """Converts SQLite values to text for best-effort grep scans.
+
+    Args:
+        value: SQLite value (text/bytes/memoryview).
+
+    Returns:
+        Decoded text string or None when unavailable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _safe_snippet(text: str, *, limit: int = 120) -> str:
+    """Returns a sanitized ASCII snippet suitable for logs.
+
+    Args:
+        text: Input text to sanitize.
+        limit: Maximum length of the snippet.
+
+    Returns:
+        Sanitized snippet string.
+    """
+    normalized = re.sub(r"\s+", " ", text).strip()
+    safe = "".join(ch if 32 <= ord(ch) <= 126 else "." for ch in normalized)
+    return safe[:limit]
+
+
+def _prefix_from_key(key: str, segments: int = 2) -> str:
+    """Returns the first N colon-delimited segments of a key.
+
+    Args:
+        key: Key string to split.
+        segments: Number of segments to keep.
+
+    Returns:
+        Prefix with up to the requested number of segments.
+    """
+    if segments <= 0:
+        return ""
+    parts = key.split(":")
+    if len(parts) <= segments:
+        return key
+    return ":".join(parts[:segments])
+
+
+def _is_hex_64(value: str) -> bool:
+    """Checks whether a string is exactly 64 hex characters.
+
+    Args:
+        value: String to check.
+
+    Returns:
+        True if the string is 64 hex characters long.
+    """
+    if len(value) != 64:
+        return False
+    return all(ch in string.hexdigits for ch in value)
+
+
+def _hex_64_substrings(value: str) -> list[str]:
+    """Extracts 64-hex substrings from a string.
+
+    Args:
+        value: String to scan.
+
+    Returns:
+        List of 64-hex substrings.
+    """
+    return re.findall(r"[0-9a-fA-F]{64}", value)
+
+
+def _string_has_handle_hint(value: str) -> bool:
+    """Returns True if the string looks like a handle reference.
+
+    Args:
+        value: String to inspect.
+
+    Returns:
+        True when the string contains handle-like hints.
+    """
+    lowered = value.lower()
+    if "agentkv:" in lowered or "blob" in lowered:
+        return True
+    if _is_hex_64(value):
+        return True
+    return bool(_hex_64_substrings(value))
+
+
+def _value_has_handle_hint(value: object) -> bool:
+    """Recursively checks if a value contains handle-like strings.
+
+    Args:
+        value: Value to inspect.
+
+    Returns:
+        True if handle-like strings are found.
+    """
+    if isinstance(value, str):
+        return _string_has_handle_hint(value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and _string_has_handle_hint(key):
+                return True
+            if _value_has_handle_hint(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_value_has_handle_hint(item) for item in value)
+    if isinstance(value, memoryview):
+        return _value_has_handle_hint(value.tobytes())
+    if isinstance(value, bytes):
+        return _string_has_handle_hint(value.decode("utf-8", errors="ignore"))
+    return False
+
+
+def _composer_handle_fields(composer: dict) -> list[str]:
+    """Finds composer fields that look like handle references.
+
+    Args:
+        composer: Composer dictionary from composer.composerData.
+
+    Returns:
+        List of field names with handle-like values.
+    """
+    fields: list[str] = []
+    for key, value in composer.items():
+        if _value_has_handle_hint(value):
+            fields.append(str(key))
+    return fields
+
+
+def _collect_handle_like_paths(value: object, path: str = "") -> list[str]:
+    """Collects dotted paths to handle-like strings inside a JSON-like value."""
+    hits: list[str] = []
+    if isinstance(value, str):
+        if _string_has_handle_hint(value):
+            hits.append(path or "<root>")
+        return hits
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_s = str(key)
+            next_path = key_s if not path else path + "." + key_s
+            hits.extend(_collect_handle_like_paths(item, next_path))
+        return hits
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            next_path = f"{path}[{idx}]" if path else f"[{idx}]"
+            hits.extend(_collect_handle_like_paths(item, next_path))
+        return hits
+    if isinstance(value, memoryview):
+        return _collect_handle_like_paths(value.tobytes(), path)
+    if isinstance(value, bytes):
+        try:
+            decoded = value.decode("utf-8", errors="ignore")
+        except Exception:
+            decoded = ""
+        if _string_has_handle_hint(decoded):
+            hits.append(path or "<root>")
+        return hits
+    return hits
 
 
 def _extract_id_list(value) -> list[str]:
@@ -1533,6 +1925,614 @@ def _cmd_reset_selection(*, cursor_user_dir: Path, path: Path, assume_yes: bool)
     _write_workspace_storage_meta(storage_dir, folder_uri)
     success("OK")
     info(f"Backup: {backup_db}")
+
+
+def _verify_cloned_composer(db_path: Path, *, title: str, composer_id: str) -> bool:
+    try:
+        con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        cur = con.cursor()
+        raw = read_kv(cur, table="ItemTable", key="composer.composerData")
+        payload = _read_json_bytes(raw)
+        if payload is None:
+            return False
+        return _composer_exists(payload, title=title, composer_id=composer_id)
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+
+
+def _cmd_clone_chat(
+    *,
+    cursor_user_dir: Path,
+    src_path: Path,
+    dst_path: Path,
+    title: str,
+    assume_yes: bool,
+    max_related_keys: int,
+) -> None:
+    if max_related_keys < 0:
+        raise ValueError("--max-related-keys must be >= 0.")
+    title = title.strip()
+    if not title:
+        raise ValueError("--title must be non-empty.")
+
+    src_folder = _normalize_workspace_path(src_path, role="Source", must_exist=True)
+    dst_folder = _normalize_workspace_path(dst_path, role="Destination", must_exist=True)
+    if src_folder == dst_folder:
+        raise ValueError("Source and destination must be different folders.")
+
+    src_ws_id = compute_folder_workspace_id(src_folder).workspace_id
+    dst_ws_id = compute_folder_workspace_id(dst_folder).workspace_id
+    src_storage_dir = workspace_storage_dir(cursor_user_dir, src_ws_id)
+    dst_storage_dir = workspace_storage_dir(cursor_user_dir, dst_ws_id)
+    src_db = src_storage_dir / "state.vscdb"
+    dst_db = dst_storage_dir / "state.vscdb"
+
+    info(f"Cursor User dir: {cursor_user_dir}")
+    info(f"Source folder: {src_folder}")
+    info(f"Destination folder: {dst_folder}")
+    info(f"Source workspaceStorage id (computed): {src_ws_id}")
+    info(f"Destination workspaceStorage id (computed): {dst_ws_id}")
+    info(f"Source DB path: {src_db}")
+    info(f"Destination DB path: {dst_db}")
+
+    if not src_storage_dir.exists():
+        raise FileNotFoundError(
+            "Source workspaceStorage entry does not exist. "
+            "Open the folder in Cursor once and retry."
+        )
+    if not dst_storage_dir.exists():
+        raise FileNotFoundError(
+            "Destination workspaceStorage entry does not exist. "
+            "Open the folder in Cursor once and retry."
+        )
+    if not src_db.exists():
+        raise FileNotFoundError(src_db)
+    if not dst_db.exists():
+        raise FileNotFoundError(dst_db)
+
+    lock_targets = list(workspace_db_paths(src_storage_dir))
+    lock_targets.extend(workspace_db_paths(dst_storage_dir))
+    assert_paths_unlocked(lock_targets)
+    success("LOCK CHECK: OK")
+
+    if not assume_yes:
+        if not is_interactive():
+            raise ValueError("Non-interactive session: use --yes to confirm clone.")
+        if not prompt_yes_no(
+            "Clone chat into destination workspace? (creates a backup)",
+            default=False,
+        ):
+            return
+
+    src_con = sqlite3.connect(f"file:{src_db.as_posix()}?mode=ro", uri=True)
+    try:
+        src_cur = src_con.cursor()
+        src_tables = {row[0] for row in src_cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "ItemTable" not in src_tables:
+            raise ValueError("Source DB missing ItemTable; composer.composerData is unavailable.")
+
+        src_composer_raw = read_kv(src_cur, table="ItemTable", key="composer.composerData")
+        src_payload = _read_json_bytes(src_composer_raw)
+        if src_payload is None:
+            raise ValueError("Source composer.composerData is missing or invalid JSON.")
+
+        composer, matches = _find_composer_by_title(src_payload, title)
+        if matches > 1:
+            warn("Multiple chats matched title; using newest by lastUpdatedAt.")
+
+        composer_id = composer.get("composerId")
+        if not isinstance(composer_id, str) or not composer_id:
+            raise ValueError("Matched composer entry is missing composerId.")
+
+        hex_needles = _extract_hex_needles_from_composer(composer)
+        composer_id_lower = composer_id.lower()
+        if composer_id_lower in hex_needles:
+            hex_needles = tuple(item for item in hex_needles if item != composer_id_lower)
+
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        tmp_db = dst_db.with_name(f"{dst_db.name}.clone-tmp-{ts}")
+        backup_db = dst_db.with_name(f"{dst_db.name}.preclone-{ts}")
+
+        dst_src_con = sqlite3.connect(f"file:{dst_db.as_posix()}?mode=ro", uri=True)
+        try:
+            tmp_con = sqlite3.connect(tmp_db.as_posix())
+            try:
+                dst_src_con.backup(tmp_con)
+            finally:
+                tmp_con.close()
+        finally:
+            dst_src_con.close()
+
+        inserted_item = 0
+        inserted_disk = 0
+        composer_ids_before = 0
+        composer_ids_after = 0
+
+        dst_con = sqlite3.connect(tmp_db.as_posix())
+        try:
+            dst_cur = dst_con.cursor()
+            _ensure_tables_exist(dst_cur)
+
+            dst_composer_raw = read_kv(dst_cur, table="ItemTable", key="composer.composerData")
+            dst_payload = _read_json_bytes(dst_composer_raw)
+            if dst_payload is None:
+                raise ValueError("Destination composer.composerData is missing or invalid JSON.")
+            composers = dst_payload.get("allComposers")
+            if not isinstance(composers, list):
+                raise ValueError("Destination composer.composerData allComposers is missing or invalid.")
+
+            composer_ids_before = len(_composer_id_list_from_composer_data(dst_composer_raw))
+            existing_ids = {
+                item.get("composerId")
+                for item in composers
+                if isinstance(item, dict) and isinstance(item.get("composerId"), str)
+            }
+            if composer_id not in existing_ids:
+                composers.append(composer)
+                dst_payload["allComposers"] = composers
+                updated_raw = json.dumps(
+                    dst_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            else:
+                if dst_composer_raw is None:
+                    raise ValueError("Destination composer.composerData is missing.")
+                updated_raw = dst_composer_raw
+            composer_ids_after = len(_composer_id_list_from_composer_data(updated_raw))
+            if composer_ids_after < composer_ids_before:
+                raise RuntimeError(
+                    "Clone would reduce visible chats ("
+                    + str(composer_ids_before)
+                    + " -> "
+                    + str(composer_ids_after)
+                    + "). Aborting to protect history."
+                )
+
+            dst_cur.execute(
+                "INSERT OR REPLACE INTO ItemTable(key, value) VALUES (?, ?)",
+                ("composer.composerData", updated_raw),
+            )
+
+            remaining = max_related_keys
+            if remaining > 0:
+                inserted_item = _copy_related_keys(
+                    src_cur=src_cur,
+                    dst_cur=dst_cur,
+                    table="ItemTable",
+                    composer_id=composer_id,
+                    hex_needles=hex_needles,
+                    max_to_copy=remaining,
+                )
+                remaining -= inserted_item
+
+            if remaining > 0 and "cursorDiskKV" in src_tables:
+                inserted_disk = _copy_related_keys(
+                    src_cur=src_cur,
+                    dst_cur=dst_cur,
+                    table="cursorDiskKV",
+                    composer_id=composer_id,
+                    hex_needles=hex_needles,
+                    max_to_copy=remaining,
+                )
+            elif max_related_keys > 0 and "cursorDiskKV" not in src_tables:
+                warn("Source DB missing cursorDiskKV; related key copy skipped.")
+
+            check = dst_cur.execute("PRAGMA integrity_check").fetchone()
+            if not check or check[0] != "ok":
+                raise RuntimeError(
+                    "SQLite integrity_check failed: " + (check[0] if check else "unknown")
+                )
+
+            dst_con.commit()
+        finally:
+            dst_con.close()
+    finally:
+        src_con.close()
+
+    shutil.move(dst_db, backup_db)
+    shutil.move(tmp_db, dst_db)
+    for suffix in ("-wal", "-shm"):
+        try:
+            (dst_db.with_name(dst_db.name + suffix)).unlink(missing_ok=True)  # type: ignore[attr-defined]
+        except TypeError:
+            p = dst_db.with_name(dst_db.name + suffix)
+            if p.exists():
+                p.unlink()
+
+    success("OK")
+    info(
+        "Inserted related keys: ItemTable="
+        + str(inserted_item)
+        + " cursorDiskKV="
+        + str(inserted_disk)
+    )
+    info(f"Composer entries: {composer_ids_before} -> {composer_ids_after}")
+    info(f"Backup: {backup_db}")
+
+    if _verify_cloned_composer(dst_db, title=title, composer_id=composer_id):
+        success("Verification: OK")
+    else:
+        warn("Verification failed: composer not found by title and composerId.")
+
+
+def _cmd_dump_composer_handles(
+    *,
+    cursor_user_dir: Path,
+    path: Path,
+    limit: int,
+    max_key_matches: int,
+) -> None:
+    """Dumps composer handle diagnostics for a workspace folder.
+
+    Args:
+        cursor_user_dir: Cursor user directory.
+        path: Workspace folder path.
+        limit: Number of composers to inspect.
+        max_key_matches: Maximum ItemTable key matches to print.
+    """
+    if limit < 0:
+        raise ValueError("--limit must be >= 0.")
+    if max_key_matches < 0:
+        raise ValueError("--max-key-matches must be >= 0.")
+
+    folder = _normalize_workspace_path(path, role="Workspace", must_exist=True)
+    computed = compute_folder_workspace_id(folder)
+    storage_dir = workspace_storage_dir(cursor_user_dir, computed.workspace_id)
+    db_path = storage_dir / "state.vscdb"
+
+    info(f"Cursor User dir: {cursor_user_dir}")
+    info(f"Workspace folder: {folder}")
+    info(f"WorkspaceStorage id (computed): {computed.workspace_id}")
+    info(f"WorkspaceStorage dir: {storage_dir}")
+    info(f"Workspace DB path: {db_path}")
+
+    if not storage_dir.exists():
+        warn("WorkspaceStorage entry does not exist. Open the folder in Cursor once and retry.")
+        return
+    if not db_path.exists():
+        warn(f"Workspace DB missing: {db_path}")
+        return
+
+    assert_paths_unlocked(workspace_db_paths(storage_dir))
+    success("LOCK CHECK: OK")
+
+    try:
+        con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        warn(f"Workspace DB open failed: {exc}")
+        return
+
+    try:
+        cur = con.cursor()
+        tables = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        itemtable_present = "ItemTable" in tables
+        cursor_disk_present = "cursorDiskKV" in tables
+
+        if not itemtable_present:
+            warn("Workspace DB missing ItemTable; composer.composerData is unavailable.")
+        composer_raw = None
+        if itemtable_present:
+            try:
+                composer_raw = read_kv(cur, table="ItemTable", key="composer.composerData")
+            except sqlite3.Error as exc:
+                warn(f"Failed to read composer.composerData: {exc}")
+                composer_raw = None
+
+        payload = None
+        if composer_raw:
+            try:
+                payload = json.loads(composer_raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                warn(f"composer.composerData is not valid JSON: {exc}")
+                payload = None
+        else:
+            warn("composer.composerData is missing.")
+
+        if isinstance(payload, dict):
+            top_keys = list(payload.keys())
+            if top_keys:
+                info("composer.composerData keys: " + ", ".join(top_keys))
+            else:
+                warn("composer.composerData contains no top-level keys.")
+
+            composers = payload.get("allComposers")
+            if not isinstance(composers, list):
+                warn("composer.composerData allComposers is not a list.")
+            else:
+                info(f"Composer count: {len(composers)}")
+                shown = 0
+                for idx, item in enumerate(composers):
+                    if shown >= limit:
+                        break
+                    label = f"Composer {idx + 1}"
+                    if not isinstance(item, dict):
+                        warn(f"{label}: expected object, got {type(item).__name__}")
+                        shown += 1
+                        continue
+                    composer_id = item.get("composerId")
+                    if not isinstance(composer_id, str):
+                        warn(f"{label}: missing composerId")
+                        composer_id = "<missing>"
+                    info(f"{label} id: {composer_id}")
+                    fields = _composer_handle_fields(item)
+                    if fields:
+                        info("  handle-like fields: " + ", ".join(fields))
+                    else:
+                        info("  handle-like fields: none")
+                    shown += 1
+        elif payload is None:
+            pass
+        else:
+            warn("composer.composerData parsed to an unexpected type.")
+
+        if itemtable_present:
+            # * Dump likely handle mapping payload if present.
+            candidate_keys = [
+                "workbench.backgroundComposer.workspacePersistentData",
+            ]
+            for key in candidate_keys:
+                try:
+                    raw = read_kv(cur, table="ItemTable", key=key)
+                except sqlite3.Error:
+                    raw = None
+                if not raw:
+                    continue
+                info(f"ItemTable value present: {key} (bytes={len(raw)})")
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    warn(f"{key}: value is not valid JSON.")
+                    continue
+                if isinstance(parsed, (dict, list)):
+                    paths = _collect_handle_like_paths(parsed)
+                    if paths:
+                        info(f"{key}: handle-like paths ({min(len(paths), 30)}/{len(paths)} shown):")
+                        for p in paths[:30]:
+                            info("  " + p)
+                    else:
+                        info(f"{key}: no handle-like strings found.")
+
+            keywords = ("composer", "agent", "kv", "blob", "handle", "hash", "ref", "index")
+            if max_key_matches == 0:
+                info("ItemTable key scan: skipped (max-key-matches=0).")
+            else:
+                try:
+                    clause = " OR ".join(["key LIKE ?"] * len(keywords))
+                    params = [f"%{kw}%" for kw in keywords] + [max_key_matches]
+                    rows = cur.execute(
+                        f"SELECT key FROM ItemTable WHERE {clause} LIMIT ?",
+                        params,
+                    ).fetchall()
+                    keys = [_decode_db_key(row[0]) for row in rows]
+                    if keys:
+                        info(f"ItemTable key matches ({len(keys)}):")
+                        for key in keys:
+                            info("  " + key)
+                    else:
+                        info("ItemTable key matches: none")
+                except sqlite3.Error as exc:
+                    warn(f"ItemTable key scan failed: {exc}")
+
+        if not cursor_disk_present:
+            warn("Workspace DB missing cursorDiskKV; agentKv scan skipped.")
+        elif max_key_matches == 0:
+            info("cursorDiskKV key scan: skipped (max-key-matches=0).")
+        else:
+            sample_limit = min(10, max_key_matches)
+            try:
+                rows = cur.execute(
+                    "SELECT key FROM cursorDiskKV WHERE key LIKE ? LIMIT ?",
+                    ("agentKv:%", sample_limit),
+                ).fetchall()
+                keys = [_decode_db_key(row[0]) for row in rows]
+                if keys:
+                    info(f"cursorDiskKV agentKv: matches ({len(keys)}):")
+                    for key in keys:
+                        info("  " + key)
+                else:
+                    info("cursorDiskKV agentKv: matches: none")
+            except sqlite3.Error as exc:
+                warn(f"cursorDiskKV key scan failed: {exc}")
+    finally:
+        con.close()
+
+
+def _cmd_dump_global_agentkv(
+    *,
+    cursor_user_dir: Path,
+    limit: int,
+    prefix: str,
+    show_prefixes: bool,
+    grep: str | None,
+) -> None:
+    """Dumps globalStorage cursorDiskKV diagnostics for agentKv keys.
+
+    Args:
+        cursor_user_dir: Cursor user directory.
+        limit: Number of keys to sample.
+        prefix: Key prefix filter.
+        show_prefixes: Whether to show prefix distribution.
+        grep: Optional substring to search in keys/values.
+    """
+    if limit < 0:
+        raise ValueError("--limit must be >= 0.")
+
+    prefix = prefix or ""
+    prefix_label = prefix if prefix else "<all>"
+    prefix_like = f"{prefix}%"
+
+    global_dir = global_storage_dir(cursor_user_dir)
+    db_path = global_dir / "state.vscdb"
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    shm_path = db_path.with_name(db_path.name + "-shm")
+
+    info(f"Cursor User dir: {cursor_user_dir}")
+    info(f"Global DB path: {db_path}")
+    info(f"Global DB WAL exists: {wal_path.exists()}")
+    info(f"Global DB SHM exists: {shm_path.exists()}")
+
+    if not db_path.exists():
+        warn(f"Global DB missing: {db_path}")
+        return
+
+    try:
+        assert_paths_unlocked([db_path, wal_path, shm_path])
+    except WorkspaceStorageLockedError as exc:
+        error("LOCK CHECK: FAILED\n" + str(exc))
+        return
+    success("LOCK CHECK: OK")
+
+    try:
+        con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        warn(f"Global DB open failed: {exc}")
+        return
+
+    try:
+        cur = con.cursor()
+        tables = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "cursorDiskKV" not in tables:
+            warn("Global DB missing cursorDiskKV table.")
+            return
+
+        success("cursorDiskKV table: OK")
+        try:
+            row = cur.execute("SELECT COUNT(*) FROM cursorDiskKV").fetchone()
+            if row:
+                info(f"cursorDiskKV rows: {int(row[0])}")
+            else:
+                warn("cursorDiskKV row count unavailable.")
+        except sqlite3.Error as exc:
+            warn(f"cursorDiskKV row count failed: {exc}")
+
+        if show_prefixes:
+            info(f"Key prefix distribution (top 30) for prefix={prefix_label}:")
+            counts: Counter[str] = Counter()
+            try:
+                for (key,) in cur.execute(
+                    "SELECT key FROM cursorDiskKV WHERE key LIKE ?",
+                    (prefix_like,),
+                ):
+                    key_text = _decode_db_key(key)
+                    counts[_prefix_from_key(key_text, segments=2)] += 1
+            except sqlite3.Error as exc:
+                warn(f"Prefix scan failed: {exc}")
+            else:
+                if counts:
+                    for prefix_key, count in counts.most_common(30):
+                        info(f"  {prefix_key}: {count}")
+                else:
+                    warn("No keys found for prefix distribution.")
+
+                keywords = ("handle", "composer", "index", "map", "ref")
+                matched = sorted(
+                    prefix_key
+                    for prefix_key in counts
+                    if any(keyword in prefix_key.lower() for keyword in keywords)
+                )
+                if matched:
+                    info("Prefix hints (handle/composer/index/map/ref):")
+                    for prefix_key in matched:
+                        info("  " + prefix_key)
+                else:
+                    info("Prefix hints (handle/composer/index/map/ref): none")
+        else:
+            info("Key prefix distribution: skipped (--no-show-prefixes).")
+
+        if limit == 0:
+            info("Sample keys: skipped (--limit=0).")
+        else:
+            try:
+                rows = cur.execute(
+                    "SELECT key FROM cursorDiskKV WHERE key LIKE ? LIMIT ?",
+                    (prefix_like, limit),
+                ).fetchall()
+                keys = [_decode_db_key(row[0]) for row in rows]
+            except sqlite3.Error as exc:
+                warn(f"Key sampling failed: {exc}")
+            else:
+                if keys:
+                    info(f"Sample keys (prefix={prefix_label}, count={len(keys)}):")
+                    for key in keys:
+                        info("  " + key)
+                else:
+                    info("Sample keys: none")
+
+            non_blob_limit = min(50, limit)
+            if non_blob_limit > 0:
+                try:
+                    rows = cur.execute(
+                        "SELECT key FROM cursorDiskKV WHERE key LIKE ? AND key NOT LIKE ? LIMIT ?",
+                        (prefix_like, "agentKv:blob:%", non_blob_limit),
+                    ).fetchall()
+                    non_blob_keys = [_decode_db_key(row[0]) for row in rows]
+                except sqlite3.Error as exc:
+                    warn(f"Non-blob sampling failed: {exc}")
+                else:
+                    if non_blob_keys:
+                        info(f"Sample non-blob keys (count={len(non_blob_keys)}):")
+                        for key in non_blob_keys:
+                            info("  " + key)
+                    else:
+                        info("Sample non-blob keys: none")
+
+        if grep is not None:
+            grep = grep.strip()
+        if grep:
+            needle = grep.lower()
+            info(f"Grep filter (case-insensitive): {grep}")
+            key_matches = 0
+            value_matches = 0
+            shown = 0
+            value_snippet_limit = 20
+            try:
+                for key, value in cur.execute(
+                    "SELECT key, value FROM cursorDiskKV WHERE key LIKE ?",
+                    (prefix_like,),
+                ):
+                    key_text = _decode_db_key(key)
+                    key_hit = needle in key_text.lower()
+                    value_text = _decode_db_value_text(value)
+                    value_hit = False
+                    if value_text is not None:
+                        value_hit = needle in value_text.lower()
+
+                    if key_hit:
+                        key_matches += 1
+                    if value_hit:
+                        value_matches += 1
+
+                    if shown < value_snippet_limit and (key_hit or value_hit):
+                        if value_hit and value_text is not None:
+                            snippet = _safe_snippet(value_text, limit=120)
+                            info(
+                                "  match: key="
+                                + key_text
+                                + " value_snippet(len="
+                                + str(len(value_text))
+                                + "): "
+                                + snippet
+                            )
+                        else:
+                            info("  match: key=" + key_text)
+                        shown += 1
+            except sqlite3.Error as exc:
+                warn(f"Grep scan failed: {exc}")
+            else:
+                info(f"Grep key matches: {key_matches}")
+                info(f"Grep value matches (utf-8): {value_matches}")
+                if key_matches == 0 and value_matches == 0:
+                    warn("Grep: no matches found.")
+        elif grep is not None:
+            warn("Grep skipped: empty --grep value.")
+    finally:
+        con.close()
 
 
 def _require_unlocked_for_merge(dst_db: Path, src_dbs: list[Path]) -> None:
